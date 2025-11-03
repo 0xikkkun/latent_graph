@@ -18,6 +18,10 @@ build/
 # Artifacts (実験結果)
 artifacts_*/
 
+# Assets for README (allow this directory)
+!assets/
+!assets/**/*.png
+
 # データセット（大きいので除外）
 dataset/
 

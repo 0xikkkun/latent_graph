@@ -2,6 +2,9 @@
 
 This repository provides tools for analyzing and visualizing the latent space of Language Models using Fisher Information Metrics. The project enables geometric analysis of LLM embeddings and comparison between different distance metrics.
 
+![Fisher Metric Visualization](assets/gpt2_fisher_metric_ns100_nd10_k10.png)
+
+
 ## 🌟 Features
 
 - **Fisher Information Metric Computation**: Compute FIM for each data point in the latent space
@@ -111,6 +114,7 @@ dataset:
 │   ├── llm_map.py                # Multi-model comparison
 │   ├── config.yaml               # Configuration
 │   └── utils.py                  # Utility functions
+├── assets/                       # Visualization images for README
 ├── artifacts_*/                  # Results (generated, gitignored)
 ├── report/                       # Documentation
 ├── requirements.txt              # Python dependencies
@@ -134,21 +138,12 @@ All plots support:
 - Label-based color coding
 - Configurable k-NN parameters
 
-## 🔬 Methodology
+### Example Visualizations
 
-### Fisher Information Metric
+**Fisher Metric vs Euclidean Comparison:**
+![Comparison](assets/gpt2_comparison_fisher_vs_euclidean_ns100_nd10_k10.png)
 
-The Fisher Information Metric (FIM) defines a Riemannian metric on the parameter space of a statistical model. In this project, we compute the FIM for each data point in the latent space:
 
-\[ G(\theta) = E_{p(x|\theta)}[\nabla_\theta \log p(x|\theta) \nabla_\theta \log p(x|\theta)^T] \]
-
-### Geodesic Distances
-
-We construct a k-NN graph using Fisher distances and compute all-pairs shortest paths (geodesic distances) using Dijkstra's algorithm.
-
-### 2D Projection
-
-Fisher metrics are projected to 2D using PCA on the embedding vectors, then visualized as ellipses in the MDS space.
 
 ## 📊 Results
 
@@ -160,26 +155,8 @@ Results are saved in the `artifacts_dir` directory:
 - `geodesic/`: Geodesic distance matrices
 - `plots/`: Generated visualizations
 
-## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
 
-## 📄 License
-
-[Add your license here]
-
-## 🙏 Citation
-
-If you use this work in your research, please cite:
-
-```bibtex
-@software{latent_graph,
-  title = {LLM Latent Space Visualization with Fisher Information Metric},
-  author = {Your Name},
-  year = {2024},
-  url = {https://github.com/yourusername/latent_graph}
-}
-```
 
 ## 📚 References
 
@@ -187,25 +164,5 @@ If you use this work in your research, please cite:
 - The Riemannian geometry of the space of probability distributions (Amari & Nagaoka, 2000)
 - The Pile: An 800GB Dataset of Diverse Text for Language Modeling (Gao et al., 2020)
 
-## 🐛 Troubleshooting
 
-### GPU Issues
-
-If GPU is not detected:
-```bash
-docker-compose logs latent_graph
-nvidia-smi
-```
-
-### Memory Issues
-
-Reduce `num_samples` or `num_datasets` in `config.yaml` for smaller models.
-
-### Dataset Loading Issues
-
-Some datasets may require internet connection or may be rate-limited. Check your network connection and consider using `streaming=True` for large datasets.
-
-## 📧 Contact
-
-[Add your contact information here]
 
