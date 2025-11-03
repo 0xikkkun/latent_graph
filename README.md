@@ -64,10 +64,8 @@ python src/compare.py --config src/config.yaml
 ### 5. Launch Streamlit GUI
 
 ```bash
-streamlit run app_streamlit.py --server.port 8501
+streamlit run app_streamlit.py
 ```
-
-Access the interactive visualization at: **http://localhost:8504**
 
 ## ⚙️ Configuration
 
