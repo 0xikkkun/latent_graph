@@ -1,0 +1,49 @@
+# 0. コンテナの起動
+docker-compose up -d
+docker-compose exec latent_graph bash
+
+# 0. 依存関係のインストール
+pip install -r requirements.txt
+
+# 1. 埋め込みベクトルとFisher計量の抽出
+python src/extract.py --config src/config.yaml
+
+# 2. 近傍グラフの構築（Fisher計量版）
+python src/graph.py --config src/config.yaml
+
+# 2b. ユークリッド距離版グラフの構築（対照実験用）
+python src/graph_euclidean.py --config src/config.yaml
+
+# 2c. Fisher計量の2次元射影
+python src/project_metrics_2d.py --config src/config.yaml
+
+# 3. 測地距離計算とMDS可視化
+python src/geo.py --config src/config.yaml
+
+# 4. Fisher計量 vs ユークリッド距離の比較可視化（対照実験）
+python src/compare_fisher_euclidean.py --config src/config.yaml
+
+# 5. MDSとt-SNEの比較可視化
+python src/compare.py --config src/config.yaml
+
+
+# ============================================
+# Streamlit GUI による対話的可視化
+# ============================================
+
+
+
+# 4. Streamlitアプリケーションを起動
+
+# streamlitの起動中のポートを確認
+ps aux | grep streamlit
+
+# Streamlitを再起動する場合：
+pkill -9 -f streamlit
+
+streamlit run app_streamlit.py
+
+# 5. ブラウザで以下にアクセス
+http://localhost:8504
+
+

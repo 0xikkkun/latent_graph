@@ -1,0 +1,26 @@
+version: '3.9'
+
+services:
+  latent_graph:
+    shm_size: '4gb'
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    volumes:
+      - .:/workspace
+      # Optional: Mount external dataset directory
+      # - /path/to/your/dataset:/workspace/dataset
+      # Optional: Mount local cache directories for faster startup
+      # - ~/.local:/root/.local
+      # - ~/.cache:/root/.cache
+    ports:
+      - "8504:8501"  # Streamlit port mapping (host:container)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    tty: true
+    stdin_open: true
