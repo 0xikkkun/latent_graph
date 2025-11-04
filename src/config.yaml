@@ -1,0 +1,18 @@
+model_name: gpt2-large
+max_length: 256
+num_samples: 350
+num_datasets: 10
+seed: 42
+lambda_reg: 0.0001
+knn_k: 10
+artifacts_dir: artifacts_gpt2_large_multi
+embeddings_dir: embeddings/gpt2_large_multi
+metrics_dir: metrics/gpt2_large_multi
+graphs_dir: graphs
+geodesic_dir: geodesic
+plots_dir: plots
+curvature_dir: curvature/gpt2_large_multi
+dataset:
+  name: multi_source
+  config: default
+  split: train

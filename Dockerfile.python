@@ -1,0 +1,36 @@
+# Base image with CUDA runtime for GPU support
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+
+# Avoid interactive prompts during apt operations
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python and basic utilities
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       python3 \
+       python3-pip \
+       python3-venv \
+       python3-dev \
+       build-essential \
+       git \
+       wget \
+       curl \
+       ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ensure `python` and `pip` commands exist
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 \
+    && update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
+
+# Set workdir inside the container
+WORKDIR /workspace
+
+# Upgrade pip to latest
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Copy requirements and install dependencies
+COPY requirements.txt /workspace/
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Default command
+CMD ["bash"]
