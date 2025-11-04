@@ -275,14 +275,17 @@ def run(config_path: str) -> None:
     paths = ensure_dirs(base_dir, *subdirs)
 
     # データ読み込み
-    num_datasets = int(cfg.get("num_datasets", 4))
+    num_datasets = int(cfg.get("num_datasets", 4))  # Fallback for backward compatibility
+    num_samples = int(cfg.get("num_samples", 100))  # Fallback if samples_per_dataset not provided
+    samples_per_dataset = cfg.get("samples_per_dataset", None)
     texts, labels = _select_nonempty_texts(
         cfg["dataset"]["name"],
         cfg["dataset"]["config"],
         cfg["dataset"]["split"],
-        int(cfg["num_samples"]),
+        num_samples,
         int(cfg["seed"]),
         num_datasets,
+        samples_per_dataset,
     )
 
     # モデル読み込み

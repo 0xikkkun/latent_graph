@@ -65,11 +65,16 @@ def run(config_path: str) -> None:
     eta_mean = eta.mean(axis=0)
     eta_centered = eta - eta_mean
     pca = PCA(n_components=2)
-    eta_2d = pca.fit_transform(eta_centered)
+    eta_2d = pca.fit_transform(eta_centered)  # (N, 2)
     
     # Project Fisher metrics to 2D
     # P: projection matrix from D-dim to 2D
     P = pca.components_.T  # (D, 2)
+    
+    # Save eta_2d and projection matrix for curvature calculation
+    save_npy(metrics_2d_dir / "eta_2d.npy", eta_2d.astype(np.float32))
+    save_npy(metrics_2d_dir / "P.npy", P.astype(np.float32))
+    print("2D eta and projection matrix saved")
     
     # GPU使用
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

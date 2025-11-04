@@ -20,12 +20,41 @@ st.title("🎯 LLM潜在空間の幾何学的分析")
 # Sidebar for parameters
 st.sidebar.header("📝 パラメータ設定")
 
-num_samples = st.sidebar.slider("num_samples", min_value=10, max_value=500, value=100, step=10)
-num_datasets = st.sidebar.slider("num_datasets", min_value=1, max_value=12, value=10, step=1)
-knn_k = st.sidebar.slider("knn_k", min_value=3, max_value=20, value=10, step=1)
+# Load current config to get default values
+config_path = Path("src/config.yaml")
+current_config = {}
+if config_path.exists():
+    with open(config_path, "r") as f:
+        current_config = yaml.safe_load(f) or {}
 
+# Dataset selection
 dataset_options = ["multi_source", "newsgroup", "JeanKaddour/minipile"]
-dataset_name = st.sidebar.selectbox("dataset.name", dataset_options, index=0)
+current_dataset = current_config.get("dataset", {}).get("name", "multi_source")
+dataset_index = dataset_options.index(current_dataset) if current_dataset in dataset_options else 0
+dataset_name = st.sidebar.selectbox("dataset.name", dataset_options, index=dataset_index)
+
+# Dataset configuration (only for multi_source and minipile)
+num_datasets = None
+samples_per_dataset = None
+if dataset_name in ["multi_source", "JeanKaddour/minipile"]:
+    num_datasets = st.sidebar.slider(
+        "num_datasets",
+        min_value=1,
+        max_value=12,
+        value=current_config.get("num_datasets", 10),
+        step=1
+    )
+    samples_per_dataset = st.sidebar.slider(
+        "samples_per_dataset",
+        min_value=1,
+        max_value=100,
+        value=current_config.get("samples_per_dataset", 10),
+        step=1
+    )
+    total = num_datasets * samples_per_dataset
+    st.sidebar.info(f"合計サンプル数: {total}")
+
+knn_k = st.sidebar.slider("knn_k", min_value=3, max_value=20, value=current_config.get("knn_k", 10), step=1)
 
 run_button = st.sidebar.button("🚀 パイプライン実行", type="primary")
 
@@ -33,21 +62,36 @@ run_button = st.sidebar.button("🚀 パイプライン実行", type="primary")
 st.sidebar.header("🎨 表示オプション")
 show_edges = st.sidebar.checkbox("エッジを表示", value=True)
 show_ellipses = st.sidebar.checkbox("楕円を表示", value=True)
+show_labels = st.sidebar.checkbox("ラベルを色で表示", value=True)
+show_curvature = st.sidebar.checkbox("曲率を色で表示", value=False)
 
 
-def update_config(num_samples, num_datasets, knn_k, dataset_name):
+def update_config(knn_k, dataset_name, num_datasets=None, samples_per_dataset=None):
     """Update config.yaml with new parameters"""
     config_path = Path("src/config.yaml")
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     
-    config["num_samples"] = num_samples
-    config["num_datasets"] = num_datasets
     config["knn_k"] = knn_k
     config["dataset"]["name"] = dataset_name
     
+    # Update dataset parameters if provided
+    if dataset_name in ["multi_source", "JeanKaddour/minipile"]:
+        if num_datasets is not None:
+            config["num_datasets"] = num_datasets
+        if samples_per_dataset is not None:
+            config["samples_per_dataset"] = samples_per_dataset
+    else:
+        # Remove dataset parameters if not applicable
+        config.pop("num_datasets", None)
+        config.pop("samples_per_dataset", None)
+    
+    # Remove deprecated parameters
+    config.pop("num_samples", None)
+    config.pop("dataset_samples", None)
+    
     with open(config_path, "w") as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
     
     return config
 
@@ -55,11 +99,12 @@ def update_config(num_samples, num_datasets, knn_k, dataset_name):
 def run_pipeline(progress_bar, progress_text):
     """Run the complete pipeline"""
     scripts = [
-        ("1/5: データ抽出中...", "src/extract.py"),
-        ("2/5: Fisherグラフ構築中...", "src/graph.py"),
-        ("3/5: Euclideanグラフ構築中...", "src/graph_euclidean.py"),
-        ("4/5: Fisher計量2D射影中...", "src/project_metrics_2d.py"),
-        ("5/5: 可視化生成中...", "src/compare_fisher_euclidean.py"),
+        ("1/6: データ抽出中...", "src/extract.py"),
+        ("2/6: Fisherグラフ構築中...", "src/graph.py"),
+        ("3/6: Euclideanグラフ構築中...", "src/graph_euclidean.py"),
+        ("4/6: Fisher計量2D射影中...", "src/project_metrics_2d.py"),
+        ("5/6: 曲率計算中...", "src/curvature_2d.py"),
+        ("6/6: 可視化生成中...", "src/compare_fisher_euclidean.py"),
     ]
     
     for progress_msg, script in scripts:
@@ -109,7 +154,13 @@ def load_data(config):
     if metrics_2d_path.exists():
         G_2d = np.load(metrics_2d_path)
     
-    return G_fisher, G_euclidean, labels, unique_labels, label_counts, texts, G_2d
+    # Load scalar curvature
+    curvature_2d_path = base / config["curvature_2d_dir"] / "scalar_curvature_2d.npy"
+    kappa_2d = None
+    if curvature_2d_path.exists():
+        kappa_2d = np.load(curvature_2d_path)
+    
+    return G_fisher, G_euclidean, labels, unique_labels, label_counts, texts, G_2d, kappa_2d
 
 
 def _all_pairs_shortest_path_matrix(G: nx.Graph) -> np.ndarray:
@@ -145,7 +196,34 @@ def compute_mds(G: nx.Graph, seed: int = 42):
     return X
 
 
-def add_ellipses_to_plot(fig, X_mds, G_2d, labels, unique_labels, row=1, col=1, alpha=0.15):
+def compute_mds_eigenvalues(G: nx.Graph):
+    """Compute MDS eigenvalues from distance matrix"""
+    D = _all_pairs_shortest_path_matrix(G)
+    N = D.shape[0]
+    
+    # Classical MDS: convert distance matrix to inner product matrix
+    # Center the distance matrix
+    D_sq = D ** 2
+    row_means = D_sq.mean(axis=1, keepdims=True)
+    col_means = D_sq.mean(axis=0, keepdims=True)
+    grand_mean = D_sq.mean()
+    
+    # Double centering
+    B = -0.5 * (D_sq - row_means - col_means + grand_mean)
+    
+    # Compute eigenvalues (only positive ones, sorted in descending order)
+    eigenvals = np.linalg.eigvalsh(B)
+    eigenvals = eigenvals[::-1]  # Sort descending
+    eigenvals = eigenvals[eigenvals > 0]  # Keep only positive eigenvalues
+    
+    # Calculate explained variance ratio
+    total_variance = eigenvals.sum()
+    explained_ratio = eigenvals / total_variance if total_variance > 0 else eigenvals
+    
+    return eigenvals, explained_ratio
+
+
+def add_ellipses_to_plot(fig, X_mds, G_2d, labels, unique_labels, row=1, col=1, alpha=0.15, use_gray=False):
     """Add Fisher metric ellipses to the plot"""
     import plotly.colors as pc
     colors = pc.qualitative.Set3[:len(unique_labels)]
@@ -200,22 +278,26 @@ def add_ellipses_to_plot(fig, X_mds, G_2d, labels, unique_labels, row=1, col=1, 
         y_final = y_rot + X_mds[i, 1]
         
         # Get color for this label
-        label = labels[i]
-        color = label_to_color[label]
-        # Add alpha for fill and border
-        import re
-        if color.startswith('rgb'):
-            match = re.match(r'rgb\((\d+),\s*(\d+),\s*(\d+)\)', color)
-            if match:
-                r, g, b = match.groups()
-                color_fill = f'rgba({r},{g},{b},0.2)'
-                color_border = f'rgba({r},{g},{b},0.6)'
+        if use_gray:
+            color_fill = 'rgba(128,128,128,0.1)'
+            color_border = 'rgba(128,128,128,0.3)'
+        else:
+            label = labels[i]
+            color = label_to_color[label]
+            # Add alpha for fill and border
+            import re
+            if color.startswith('rgb'):
+                match = re.match(r'rgb\((\d+),\s*(\d+),\s*(\d+)\)', color)
+                if match:
+                    r, g, b = match.groups()
+                    color_fill = f'rgba({r},{g},{b},0.2)'
+                    color_border = f'rgba({r},{g},{b},0.6)'
+                else:
+                    color_fill = color
+                    color_border = color
             else:
                 color_fill = color
                 color_border = color
-        else:
-            color_fill = color
-            color_border = color
         
         # Add ellipse (filled)
         fig.add_trace(
@@ -298,7 +380,7 @@ def create_distance_scatter_plot(D_fisher, D_euclidean, labels, unique_labels):
     return fig
 
 
-def create_plotly_figure(X_fisher, X_euclidean, G_fisher, G_euclidean, labels, unique_labels, label_counts, G_2d=None, show_edges=True, show_ellipses=True):
+def create_plotly_figure(X_fisher, X_euclidean, G_fisher, G_euclidean, labels, unique_labels, label_counts, G_2d=None, kappa_2d=None, show_edges=True, show_ellipses=True, show_labels=True, show_curvature=False):
     """Create Plotly comparison figure"""
     # Define colors for labels
     import plotly.colors as pc
@@ -355,14 +437,25 @@ def create_plotly_figure(X_fisher, X_euclidean, G_fisher, G_euclidean, labels, u
     for label in unique_labels:
         mask = np.array(labels) == label
         texts_preview = []
+        indices_list = []
         for i in np.where(mask)[0]:
             if "texts" in st.session_state and i < len(st.session_state.texts):
                 text = st.session_state.texts[i]
                 texts_preview.append(text[:100] + "..." if len(text) > 100 else text)
             else:
                 texts_preview.append("")
+            indices_list.append(i)
         
-        hover_texts = [f"{label}<br>Text: {text}" for text in texts_preview]
+        # Build hover texts with metric matrix if available and ellipses are shown
+        hover_texts = []
+        for idx, text in zip(indices_list, texts_preview):
+            hover_str = f"{label}<br>Text: {text}"
+            if show_ellipses and G_2d is not None and idx < len(G_2d):
+                G_i = G_2d[idx]
+                hover_str += f"<br><br>2D Metric Matrix:<br>"
+                hover_str += f"[{G_i[0,0]:.4f}, {G_i[0,1]:.4f}]<br>"
+                hover_str += f"[{G_i[1,0]:.4f}, {G_i[1,1]:.4f}]"
+            hover_texts.append(hover_str)
         
         fig.add_trace(
             go.Scatter(
@@ -422,7 +515,7 @@ def create_plotly_figure(X_fisher, X_euclidean, G_fisher, G_euclidean, labels, u
     return fig
 
 
-def create_fisher_metric_plot(X_fisher, G_fisher, labels, unique_labels, label_counts, G_2d=None, show_edges=True, show_ellipses=True):
+def create_fisher_metric_plot(X_fisher, G_fisher, labels, unique_labels, label_counts, G_2d=None, kappa_2d=None, show_edges=True, show_ellipses=True, show_labels=True, show_curvature=False):
     """Create single Fisher metric plot with ellipses"""
     import plotly.colors as pc
     colors = pc.qualitative.Set3[:len(unique_labels)]
@@ -436,8 +529,14 @@ def create_fisher_metric_plot(X_fisher, G_fisher, labels, unique_labels, label_c
     )
     
     # Add Fisher metric ellipses FIRST (behind everything else)
+    # Ellipses are always colored by labels (or gray), not by curvature
     if G_2d is not None and show_ellipses:
-        add_ellipses_to_plot(fig, X_fisher, G_2d, labels, unique_labels, row=1, col=1, alpha=0.15)
+        if show_labels:
+            # Use label colors for ellipses
+            add_ellipses_to_plot(fig, X_fisher, G_2d, labels, unique_labels, row=1, col=1, alpha=0.15)
+        else:
+            # Gray ellipses when labels are not shown
+            add_ellipses_to_plot(fig, X_fisher, G_2d, labels, unique_labels, row=1, col=1, alpha=0.15, use_gray=True)
     
     # Plot Fisher metric graph
     if show_edges:
@@ -457,29 +556,178 @@ def create_fisher_metric_plot(X_fisher, G_fisher, labels, unique_labels, label_c
                 )
     
     # Plot nodes for Fisher metric
-    for label in unique_labels:
-        mask = np.array(labels) == label
+    if kappa_2d is not None and show_curvature:
+        # Curvature coloring with outlier handling
+        # Use percentiles to set scale, outliers will be shown in black
+        kappa_p2_5 = np.percentile(kappa_2d, 2.5)
+        kappa_p97_5 = np.percentile(kappa_2d, 97.5)
+        kappa_vmin = kappa_p2_5
+        kappa_vmax = kappa_p97_5
+        
+        # Create masks for normal values and outliers
+        normal_mask = (kappa_2d >= kappa_vmin) & (kappa_2d <= kappa_vmax)
+        outlier_low_mask = kappa_2d < kappa_vmin  # 小さい外れ値
+        outlier_high_mask = kappa_2d > kappa_vmax  # 大きい外れ値
+        normal_indices = np.where(normal_mask)[0]
+        outlier_low_indices = np.where(outlier_low_mask)[0]
+        outlier_high_indices = np.where(outlier_high_mask)[0]
+        
         texts_preview = []
-        for i in np.where(mask)[0]:
+        for i in range(len(X_fisher)):
             if "texts" in st.session_state and i < len(st.session_state.texts):
                 text = st.session_state.texts[i]
                 texts_preview.append(text[:100] + "..." if len(text) > 100 else text)
             else:
                 texts_preview.append("")
         
-        hover_texts = [f"{label}<br>Text: {text}" for text in texts_preview]
+        # Build hover texts with curvature and metric matrix if available and ellipses are shown
+        hover_texts = []
+        for i, text in enumerate(texts_preview):
+            hover_str = f"Curvature: {kappa_2d[i]:.4f}<br>Text: {text}"
+            if show_ellipses and G_2d is not None and i < len(G_2d):
+                G_i = G_2d[i]
+                hover_str += f"<br><br>2D Metric Matrix:<br>"
+                hover_str += f"[{G_i[0,0]:.4f}, {G_i[0,1]:.4f}]<br>"
+                hover_str += f"[{G_i[1,0]:.4f}, {G_i[1,1]:.4f}]"
+            hover_texts.append(hover_str)
+        
+        # Plot normal values with colormap
+        if len(normal_indices) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=X_fisher[normal_indices, 0],
+                    y=X_fisher[normal_indices, 1],
+                    mode='markers',
+                    marker=dict(
+                        size=10,
+                        color=kappa_2d[normal_indices],
+                        colorscale='RdYlBu_r',
+                        cmin=kappa_vmin,
+                        cmax=kappa_vmax,
+                        colorbar=dict(title="Scalar Curvature", len=0.5, y=0.75),
+                        line=dict(width=0.8, color='black')
+                    ),
+                    name="Curvature",
+                    text=[hover_texts[i] for i in normal_indices],
+                    hovertemplate='%{text}<extra></extra>',
+                    legendgroup="group1",
+                    showlegend=False
+                ),
+                row=1, col=1
+            )
+        
+        # Plot small outliers in black
+        if len(outlier_low_indices) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=X_fisher[outlier_low_indices, 0],
+                    y=X_fisher[outlier_low_indices, 1],
+                    mode='markers',
+                    marker=dict(
+                        size=10,
+                        color='black',
+                        line=dict(width=0.8, color='black')
+                    ),
+                    name="Curvature (outliers - low)",
+                    text=[hover_texts[i] for i in outlier_low_indices],
+                    hovertemplate='%{text}<extra></extra>',
+                    legendgroup="group1",
+                    showlegend=False
+                ),
+                row=1, col=1
+            )
+        
+        # Plot large outliers in white
+        if len(outlier_high_indices) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=X_fisher[outlier_high_indices, 0],
+                    y=X_fisher[outlier_high_indices, 1],
+                    mode='markers',
+                    marker=dict(
+                        size=10,
+                        color='white',
+                        line=dict(width=0.8, color='black')
+                    ),
+                    name="Curvature (outliers - high)",
+                    text=[hover_texts[i] for i in outlier_high_indices],
+                    hovertemplate='%{text}<extra></extra>',
+                    legendgroup="group1",
+                    showlegend=False
+                ),
+                row=1, col=1
+            )
+    elif show_labels:
+        # Label-based coloring
+        for label in unique_labels:
+            mask = np.array(labels) == label
+            texts_preview = []
+            indices_list = []
+            for i in np.where(mask)[0]:
+                if "texts" in st.session_state and i < len(st.session_state.texts):
+                    text = st.session_state.texts[i]
+                    texts_preview.append(text[:100] + "..." if len(text) > 100 else text)
+                else:
+                    texts_preview.append("")
+                indices_list.append(i)
+            
+            # Build hover texts with metric matrix if available and ellipses are shown
+            hover_texts = []
+            for idx, text in zip(indices_list, texts_preview):
+                hover_str = f"{label}<br>Text: {text}"
+                if show_ellipses and G_2d is not None and idx < len(G_2d):
+                    G_i = G_2d[idx]
+                    hover_str += f"<br><br>2D Metric Matrix:<br>"
+                    hover_str += f"[{G_i[0,0]:.4f}, {G_i[0,1]:.4f}]<br>"
+                    hover_str += f"[{G_i[1,0]:.4f}, {G_i[1,1]:.4f}]"
+                hover_texts.append(hover_str)
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=X_fisher[mask, 0],
+                    y=X_fisher[mask, 1],
+                    mode='markers',
+                    marker=dict(size=8, color=label_to_color[label], line=dict(width=0.5, color='black')),
+                    name=f"{label} ({label_counts.get(label, 0)})",
+                    text=hover_texts,
+                    hovertemplate='%{text}<extra></extra>',
+                    legendgroup="group1",
+                    showlegend=True
+                ),
+                row=1, col=1
+            )
+    else:
+        # No coloring - gray
+        texts_preview = []
+        for i in range(len(X_fisher)):
+            if "texts" in st.session_state and i < len(st.session_state.texts):
+                text = st.session_state.texts[i]
+                texts_preview.append(text[:100] + "..." if len(text) > 100 else text)
+            else:
+                texts_preview.append("")
+        
+        # Build hover texts with metric matrix if available and ellipses are shown
+        hover_texts = []
+        for i, text in enumerate(texts_preview):
+            hover_str = text if text else "Point"
+            if show_ellipses and G_2d is not None and i < len(G_2d):
+                G_i = G_2d[i]
+                hover_str += f"<br><br>2D Metric Matrix:<br>"
+                hover_str += f"[{G_i[0,0]:.4f}, {G_i[0,1]:.4f}]<br>"
+                hover_str += f"[{G_i[1,0]:.4f}, {G_i[1,1]:.4f}]"
+            hover_texts.append(hover_str)
         
         fig.add_trace(
             go.Scatter(
-                x=X_fisher[mask, 0],
-                y=X_fisher[mask, 1],
+                x=X_fisher[:, 0],
+                y=X_fisher[:, 1],
                 mode='markers',
-                marker=dict(size=8, color=label_to_color[label], line=dict(width=0.5, color='black')),
-                name=f"{label} ({label_counts.get(label, 0)})",
+                marker=dict(size=8, color='gray', line=dict(width=0.5, color='black')),
+                name="Points",
                 text=hover_texts,
                 hovertemplate='%{text}<extra></extra>',
                 legendgroup="group1",
-                showlegend=True
+                showlegend=False
             ),
             row=1, col=1
         )
@@ -500,7 +748,7 @@ def create_fisher_metric_plot(X_fisher, G_fisher, labels, unique_labels, label_c
 # Main logic
 if run_button:
     # Update config
-    config = update_config(num_samples, num_datasets, knn_k, dataset_name)
+    config = update_config(knn_k, dataset_name, num_datasets, samples_per_dataset)
     st.sidebar.success("Config updated!")
     
     # Progress bar
@@ -515,7 +763,7 @@ if run_button:
         
         # Load and visualize
         try:
-            G_fisher, G_euclidean, labels, unique_labels, label_counts, texts, G_2d = load_data(config)
+            G_fisher, G_euclidean, labels, unique_labels, label_counts, texts, G_2d, kappa_2d = load_data(config)
             
             # Store texts in session state for plotly
             st.session_state.texts = texts
@@ -526,7 +774,7 @@ if run_button:
             
             # Create comparison plot
             fig = create_plotly_figure(X_fisher, X_euclidean, G_fisher, G_euclidean, 
-                                     labels, unique_labels, label_counts, G_2d, show_edges, show_ellipses)
+                                     labels, unique_labels, label_counts, G_2d, kappa_2d, show_edges, show_ellipses, show_labels, show_curvature)
             
             st.plotly_chart(fig, use_container_width=True)
             
@@ -540,8 +788,204 @@ if run_button:
             # Create Fisher metric plot with ellipses
             if G_2d is not None:
                 st.subheader("🎯 Fisher Metric Visualization with Ellipses")
-                fisher_fig = create_fisher_metric_plot(X_fisher, G_fisher, labels, unique_labels, label_counts, G_2d, show_edges, show_ellipses)
+                fisher_fig = create_fisher_metric_plot(X_fisher, G_fisher, labels, unique_labels, label_counts, G_2d, kappa_2d, show_edges, show_ellipses, show_labels, show_curvature)
                 st.plotly_chart(fisher_fig, use_container_width=True)
+            
+            # Create scalar curvature histogram (colored by labels)
+            if kappa_2d is not None:
+                st.subheader("📈 Scalar Curvature Histogram (by Label)")
+                fig_hist = go.Figure()
+                
+                # Get colors for labels
+                import plotly.colors as pc
+                colors = pc.qualitative.Set3[:len(unique_labels)]
+                label_to_color = {label: colors[i] for i, label in enumerate(unique_labels)}
+                
+                # Add histogram for each label
+                for label in unique_labels:
+                    mask = np.array(labels) == label
+                    kappa_label = kappa_2d[mask]
+                    
+                    fig_hist.add_trace(go.Histogram(
+                        x=kappa_label,
+                        nbinsx=50,
+                        name=f"{label} ({label_counts.get(label, 0)})",
+                        marker_color=label_to_color[label],
+                        opacity=1.0,  # Full opacity for stacked histogram
+                        marker_line=dict(
+                            color='white',
+                            width=0.5
+                        ),
+                        hovertemplate=f'Label: {label}<br>Range: %{{x}}<br>Count: %{{y}}<extra></extra>'
+                    ))
+                
+                # Calculate statistics
+                kappa_mean = np.mean(kappa_2d)
+                kappa_variance = np.var(kappa_2d)
+                
+                # Paper-style layout: clean and professional
+                fig_hist.update_layout(
+                    title=dict(
+                        text="Scalar Curvature Distribution",
+                        font=dict(size=18, family="Arial, sans-serif"),
+                        x=0.5,
+                        xanchor='center'
+                    ),
+                    xaxis=dict(
+                        title=dict(
+                            text="Scalar Curvature (κ)",
+                            font=dict(size=14, family="Arial, sans-serif")
+                        ),
+                        tickfont=dict(size=12, family="Arial, sans-serif"),
+                        showgrid=True,
+                        gridcolor='rgba(0,0,0,0.1)',
+                        gridwidth=1,
+                        showline=True,
+                        linewidth=1,
+                        linecolor='black',
+                        mirror=True
+                    ),
+                    yaxis=dict(
+                        title=dict(
+                            text="Frequency",
+                            font=dict(size=14, family="Arial, sans-serif")
+                        ),
+                        tickfont=dict(size=12, family="Arial, sans-serif"),
+                        showgrid=True,
+                        gridcolor='rgba(0,0,0,0.1)',
+                        gridwidth=1,
+                        showline=True,
+                        linewidth=1,
+                        linecolor='black',
+                        mirror=True
+                    ),
+                    height=500,
+                    barmode='stack',
+                    plot_bgcolor='white',
+                    paper_bgcolor='white',
+                    showlegend=True,
+                    legend=dict(
+                        title=dict(
+                            text="Labels",
+                            font=dict(size=12, family="Arial, sans-serif")
+                        ),
+                        font=dict(size=11, family="Arial, sans-serif"),
+                        yanchor="top",
+                        y=0.99,
+                        xanchor="left",
+                        x=1.01,  # Move slightly left to avoid overlap
+                        bgcolor='white',
+                        bordercolor='black',
+                        borderwidth=1,
+                        itemclick="toggleothers",
+                        itemdoubleclick="toggle"
+                    ),
+                    annotations=[
+                        dict(
+                            text=f"Mean: {kappa_mean:.4f}, Variance: {kappa_variance:.4f}",
+                            xref="paper",
+                            yref="paper",
+                            x=0.5,
+                            y=1.03,  # Lower position to avoid overlap
+                            showarrow=False,
+                            font=dict(size=11, family="Arial, sans-serif"),
+                            align='center',
+                            bgcolor='white',
+                            bordercolor='black',
+                            borderwidth=0.5,
+                            borderpad=3
+                        )
+                    ],
+                    margin=dict(l=60, r=120, t=80, b=60)  # Add margins to ensure everything fits
+                )
+                
+                # Add mean line (subtle, without annotation to avoid overlap with legend)
+                fig_hist.add_vline(
+                    x=kappa_mean,
+                    line_dash="dash",
+                    line_color="black",
+                    line_width=1.5,
+                    opacity=0.5,
+                    annotation_text="",  # No annotation to avoid overlap
+                    annotation_position="top"
+                )
+                
+                st.plotly_chart(fig_hist, use_container_width=True)
+                
+                # Display statistics
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Mean", f"{kappa_mean:.4f}")
+                with col2:
+                    st.metric("Variance", f"{kappa_variance:.4f}")
+                with col3:
+                    st.metric("Std Dev", f"{np.std(kappa_2d):.4f}")
+                with col4:
+                    st.metric("Range", f"[{np.min(kappa_2d):.4f}, {np.max(kappa_2d):.4f}]")
+            
+            # Create MDS eigenvalues bar chart
+            st.subheader("📊 MDS Eigenvalues")
+            eigenvals_fisher, explained_ratio_fisher = compute_mds_eigenvalues(G_fisher)
+            eigenvals_euclidean, explained_ratio_euclidean = compute_mds_eigenvalues(G_euclidean)
+            
+            # Create bar chart for eigenvalues
+            n_show = min(20, len(eigenvals_fisher), len(eigenvals_euclidean))
+            
+            fig_eigen = make_subplots(
+                rows=1, cols=2,
+                subplot_titles=("MDS Eigenvalues (Fisher Metric)", "MDS Eigenvalues (Euclidean Distance)"),
+                horizontal_spacing=0.15
+            )
+            
+            # Fisher eigenvalues
+            fig_eigen.add_trace(
+                go.Bar(
+                    x=list(range(1, n_show + 1)),
+                    y=eigenvals_fisher[:n_show],
+                    name="Fisher",
+                    marker_color='steelblue',
+                    text=[f'{r:.3f}' for r in explained_ratio_fisher[:n_show]],
+                    textposition='outside',
+                    hovertemplate='Dimension %{x}<br>Eigenvalue: %{y:.4f}<br>Explained Ratio: %{text}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+            
+            # Euclidean eigenvalues
+            fig_eigen.add_trace(
+                go.Bar(
+                    x=list(range(1, n_show + 1)),
+                    y=eigenvals_euclidean[:n_show],
+                    name="Euclidean",
+                    marker_color='coral',
+                    text=[f'{r:.3f}' for r in explained_ratio_euclidean[:n_show]],
+                    textposition='outside',
+                    hovertemplate='Dimension %{x}<br>Eigenvalue: %{y:.4f}<br>Explained Ratio: %{text}<extra></extra>'
+                ),
+                row=1, col=2
+            )
+            
+            fig_eigen.update_xaxes(title_text="Dimension", row=1, col=1)
+            fig_eigen.update_yaxes(title_text="Eigenvalue", row=1, col=1)
+            fig_eigen.update_xaxes(title_text="Dimension", row=1, col=2)
+            fig_eigen.update_yaxes(title_text="Eigenvalue", row=1, col=2)
+            fig_eigen.update_layout(height=500, showlegend=False)
+            
+            st.plotly_chart(fig_eigen, use_container_width=True)
+            
+            # Display statistics
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Fisher Metric MDS:**")
+                st.write(f"- Total variance: {eigenvals_fisher.sum():.4f}")
+                st.write(f"- 2D explained ratio: {explained_ratio_fisher[:2].sum():.4f}")
+                st.write(f"- Top 5 eigenvalues: {', '.join([f'{v:.4f}' for v in eigenvals_fisher[:5]])}")
+            
+            with col2:
+                st.write("**Euclidean MDS:**")
+                st.write(f"- Total variance: {eigenvals_euclidean.sum():.4f}")
+                st.write(f"- 2D explained ratio: {explained_ratio_euclidean[:2].sum():.4f}")
+                st.write(f"- Top 5 eigenvalues: {', '.join([f'{v:.4f}' for v in eigenvals_euclidean[:5]])}")
             
         except Exception as e:
             st.error(f"Error loading/visualizing results: {e}")
@@ -563,7 +1007,7 @@ try:
         st.info("📊 既存の結果が見つかりました。可視化を読み込んでいます...")
         
         # Load data
-        G_fisher, G_euclidean, labels, unique_labels, label_counts, texts, G_2d = load_data(default_config)
+        G_fisher, G_euclidean, labels, unique_labels, label_counts, texts, G_2d, kappa_2d = load_data(default_config)
         
         # Store texts in session state for plotly
         st.session_state.texts = texts
@@ -578,7 +1022,7 @@ try:
         
         # Create comparison plot
         fig = create_plotly_figure(X_fisher, X_euclidean, G_fisher, G_euclidean, 
-                                 labels, unique_labels, label_counts, G_2d, show_edges, show_ellipses)
+                                   labels, unique_labels, label_counts, G_2d, kappa_2d, show_edges, show_ellipses, show_labels, show_curvature)
         
         st.plotly_chart(fig, use_container_width=True)
         
@@ -592,8 +1036,133 @@ try:
         # Create Fisher metric plot with ellipses
         if G_2d is not None:
             st.subheader("🎯 Fisher Metric Visualization with Ellipses")
-            fisher_fig = create_fisher_metric_plot(X_fisher, G_fisher, labels, unique_labels, label_counts, G_2d, show_edges, show_ellipses)
+            fisher_fig = create_fisher_metric_plot(X_fisher, G_fisher, labels, unique_labels, label_counts, G_2d, kappa_2d, show_edges, show_ellipses, show_labels, show_curvature)
             st.plotly_chart(fisher_fig, use_container_width=True)
+        
+        # Create scalar curvature histogram (colored by labels)
+        if kappa_2d is not None:
+            st.subheader("📈 Scalar Curvature Histogram (by Label)")
+            fig_hist = go.Figure()
+            
+            # Get colors for labels
+            import plotly.colors as pc
+            colors = pc.qualitative.Set3[:len(unique_labels)]
+            label_to_color = {label: colors[i] for i, label in enumerate(unique_labels)}
+            
+            # Add histogram for each label
+            for label in unique_labels:
+                mask = np.array(labels) == label
+                kappa_label = kappa_2d[mask]
+                
+                fig_hist.add_trace(go.Histogram(
+                    x=kappa_label,
+                    nbinsx=50,
+                    name=f"{label} ({label_counts.get(label, 0)})",
+                    marker_color=label_to_color[label],
+                    opacity=1.0,  # Full opacity for stacked histogram
+                    marker_line=dict(
+                        color='white',
+                        width=0.5
+                    ),
+                    hovertemplate=f'Label: {label}<br>Range: %{{x}}<br>Count: %{{y}}<extra></extra>'
+                ))
+            
+            # Calculate statistics
+            kappa_mean = np.mean(kappa_2d)
+            kappa_variance = np.var(kappa_2d)
+            
+            # Paper-style layout: clean and professional
+            fig_hist.update_layout(
+                title=dict(
+                    text="Scalar Curvature Distribution",
+                    font=dict(size=18, family="Arial, sans-serif"),
+                    x=0.5,
+                    xanchor='center'
+                ),
+                xaxis=dict(
+                    title=dict(
+                        text="Scalar Curvature (κ)",
+                        font=dict(size=14, family="Arial, sans-serif")
+                    ),
+                    tickfont=dict(size=12, family="Arial, sans-serif"),
+                    showgrid=True,
+                    gridcolor='rgba(0,0,0,0.1)',
+                    gridwidth=1,
+                    showline=True,
+                    linewidth=1,
+                    linecolor='black',
+                    mirror=True
+                ),
+                yaxis=dict(
+                    title=dict(
+                        text="Frequency",
+                        font=dict(size=14, family="Arial, sans-serif")
+                    ),
+                    tickfont=dict(size=12, family="Arial, sans-serif"),
+                    showgrid=True,
+                    gridcolor='rgba(0,0,0,0.1)',
+                    gridwidth=1,
+                    showline=True,
+                    linewidth=1,
+                    linecolor='black',
+                    mirror=True
+                ),
+                height=500,
+                barmode='stack',
+                plot_bgcolor='white',
+                paper_bgcolor='white',
+                showlegend=True,
+                legend=dict(
+                    title=dict(
+                        text="Labels",
+                        font=dict(size=12, family="Arial, sans-serif")
+                    ),
+                    font=dict(size=11, family="Arial, sans-serif"),
+                    yanchor="top",
+                    y=0.99,
+                    xanchor="left",
+                    x=1.02,
+                    bgcolor='white',
+                    bordercolor='black',
+                    borderwidth=1
+                ),
+                annotations=[
+                    dict(
+                        text=f"Mean: {kappa_mean:.4f}, Variance: {kappa_variance:.4f}",
+                        xref="paper",
+                        yref="paper",
+                        x=0.5,
+                        y=1.05,
+                        showarrow=False,
+                        font=dict(size=11, family="Arial, sans-serif"),
+                        align='center'
+                    )
+                ]
+            )
+            
+            # Add mean line (subtle, without annotation to avoid overlap with legend)
+            fig_hist.add_vline(
+                x=kappa_mean,
+                line_dash="dash",
+                line_color="black",
+                line_width=1.5,
+                opacity=0.5,
+                annotation_text="",  # No annotation to avoid overlap
+                annotation_position="top"
+            )
+            
+            st.plotly_chart(fig_hist, use_container_width=True)
+            
+            # Display statistics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Mean", f"{kappa_mean:.4f}")
+            with col2:
+                st.metric("Variance", f"{kappa_variance:.4f}")
+            with col3:
+                st.metric("Std Dev", f"{np.std(kappa_2d):.4f}")
+            with col4:
+                st.metric("Range", f"[{np.min(kappa_2d):.4f}, {np.max(kappa_2d):.4f}]")
         
 except Exception as e:
     if "run_button" not in locals():

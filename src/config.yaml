@@ -1,7 +1,5 @@
 model_name: gpt2-large
 max_length: 256
-num_samples: 350
-num_datasets: 10
 seed: 42
 lambda_reg: 0.0001
 knn_k: 10
@@ -12,7 +10,10 @@ graphs_dir: graphs
 geodesic_dir: geodesic
 plots_dir: plots
 curvature_dir: curvature/gpt2_large_multi
+curvature_2d_dir: curvature_2d/gpt2_large_multi
 dataset:
   name: multi_source
   config: default
   split: train
+num_datasets: 10
+samples_per_dataset: 15

@@ -11,13 +11,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from utils import set_global_seed, ensure_dirs, save_npy, save_json, save_csv_diag
 
 
-def _select_nonempty_texts(dataset_name: str, config: str, split: str, num: int, seed: int, num_datasets: int = 4) -> Tuple[List[str], List[str]]:
+def _select_nonempty_texts(dataset_name: str, config: str, split: str, num: int, seed: int, num_datasets: int = 4, samples_per_dataset: int = None) -> Tuple[List[str], List[str]]:
     if dataset_name == "newsgroup":
         return _load_newsgroup_dataset(num, seed)
     elif dataset_name == "multi_source":
-        return _load_multi_source_dataset(num, seed, num_datasets)
+        return _load_multi_source_dataset(num, seed, num_datasets, samples_per_dataset)
     elif dataset_name == "JeanKaddour/minipile" or dataset_name == "minipile":
-        return _load_minipile_dataset(num, seed, num_datasets)
+        return _load_minipile_dataset(num, seed, num_datasets, samples_per_dataset)
     else:
         # Original single dataset loading
         ds = load_dataset(dataset_name, config, split=split)
@@ -47,8 +47,15 @@ def _select_nonempty_texts(dataset_name: str, config: str, split: str, num: int,
         return texts, labels
 
 
-def _load_multi_source_dataset(num: int, seed: int, num_datasets: int = 4) -> Tuple[List[str], List[str]]:
-    """Load multiple datasets to simulate The Pile with different sources"""
+def _load_multi_source_dataset(num: int, seed: int, num_datasets: int = 4, samples_per_dataset: int = None) -> Tuple[List[str], List[str]]:
+    """Load multiple datasets to simulate The Pile with different sources
+    
+    Args:
+        num: Total number of samples (used as fallback if samples_per_dataset not provided)
+        seed: Random seed
+        num_datasets: Number of datasets to use
+        samples_per_dataset: Number of samples to load from each dataset (if None, uses num // num_datasets)
+    """
     import random
     random.seed(seed)
     
@@ -69,28 +76,24 @@ def _load_multi_source_dataset(num: int, seed: int, num_datasets: int = 4) -> Tu
         ("tatoeba", None, "train", "Tatoeba"),
     ]
     
-    # Limit the number of datasets to use
-    num_datasets = min(num_datasets, len(datasets_config))
-    datasets_config = datasets_config[:num_datasets]
-    
-    # Alternative simpler approach: create synthetic labels from wikitext
-    # if True:  # Use this simpler approach for now
-    #     print("Using simplified approach with synthetic labels...")
-    #     return _create_synthetic_labels(num, seed)
-    
     texts: List[str] = []
     labels: List[str] = []
     
-    # Calculate samples per dataset
-    samples_per_dataset = max(1, num // len(datasets_config))
-    remaining = num
+    # Determine samples per dataset
+    if samples_per_dataset is not None:
+        per_dataset = samples_per_dataset
+    else:
+        per_dataset = max(1, num // num_datasets)
+    
+    # Limit to available datasets
+    num_datasets = min(num_datasets, len(datasets_config))
+    datasets_config = datasets_config[:num_datasets]
+    
+    print(f"Loading {num_datasets} datasets with {per_dataset} samples each (total: {num_datasets * per_dataset})")
     
     for dataset_name, config, split, label in datasets_config:
-        if remaining <= 0:
-            break
-            
         try:
-            print(f"Loading {dataset_name} ({label})...")
+            print(f"Loading {dataset_name} ({label}) - requesting {per_dataset} samples...")
             if config:
                 ds = load_dataset(dataset_name, config, split=split, streaming=True)
             else:
@@ -102,45 +105,33 @@ def _load_multi_source_dataset(num: int, seed: int, num_datasets: int = 4) -> Tu
                 t = (ex.get("text") or ex.get("content") or "").strip()
                 if t and len(t) > 50:  # Filter very short texts
                     dataset_texts.append(t)
-                if len(dataset_texts) >= samples_per_dataset:  # Get enough samples
+                if len(dataset_texts) >= per_dataset * 2:  # Get more than needed for sampling
                     break
             
             # Randomly sample from this dataset
             if dataset_texts:
-                sample_size = min(samples_per_dataset, len(dataset_texts), remaining)
+                sample_size = min(per_dataset, len(dataset_texts))
                 sampled_texts = random.sample(dataset_texts, sample_size)
                 texts.extend(sampled_texts)
                 labels.extend([label] * sample_size)
-                remaining -= sample_size
                 print(f"  Loaded {sample_size} samples from {label}")
-            
+            else:
+                print(f"  Warning: No valid texts found for {label}")
+                    
         except Exception as e:
             print(f"  Warning: Failed to load {dataset_name}: {e}")
             continue
     
-    # If we still need more samples, fill with a fallback dataset
-    if remaining > 0:
-        try:
-            print("Loading fallback dataset (wikitext)...")
-            ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-            for ex in ds:
-                t = (ex.get("text") or "").strip()
-                if t:
-                    texts.append(t)
-                    labels.append("WikiText")
-                    remaining -= 1
-                    if remaining <= 0:
-                        break
-        except Exception as e:
-            print(f"Warning: Fallback dataset failed: {e}")
+    total_samples = len(texts)
+    expected_total = num_datasets * per_dataset
+    print(f"Total loaded: {total_samples} samples (expected: {expected_total})")
+    if total_samples < expected_total:
+        print(f"Warning: Only found {total_samples} samples, requested {expected_total}")
     
-    if len(texts) < num:
-        print(f"Warning: Only found {len(texts)} samples, requested {num}")
-    
-    return texts[:num], labels[:num]
+    return texts, labels
 
 
-def _load_minipile_dataset(num: int, seed: int, num_datasets: int = 10) -> Tuple[List[str], List[str]]:
+def _load_minipile_dataset(num: int, seed: int, num_datasets: int = 10, samples_per_dataset: int = None) -> Tuple[List[str], List[str]]:
     """Load MiniPile dataset and extract samples from different sources"""
     import random
     random.seed(seed)
@@ -152,7 +143,7 @@ def _load_minipile_dataset(num: int, seed: int, num_datasets: int = 10) -> Tuple
     except Exception as e:
         print(f"Error loading MiniPile: {e}")
         print("Falling back to multi_source dataset...")
-        return _load_multi_source_dataset(num, seed, num_datasets)
+        return _load_multi_source_dataset(num, seed, num_datasets, dataset_samples)
     
     texts: List[str] = []
     labels: List[str] = []
@@ -182,40 +173,46 @@ def _load_minipile_dataset(num: int, seed: int, num_datasets: int = 10) -> Tuple
     unique_sources = list(source_groups.keys())
     print(f"Found {len(unique_sources)} unique sources: {unique_sources}")
     
-    # Limit number of datasets
+    # Determine samples per dataset
+    if samples_per_dataset is not None:
+        per_dataset = samples_per_dataset
+    else:
+        per_dataset = max(1, num // num_datasets)
+    
+    # Limit to available sources
     num_datasets = min(num_datasets, len(unique_sources))
     selected_sources = unique_sources[:num_datasets]
-    print(f"Using {num_datasets} sources: {selected_sources}")
     
-    # Calculate samples per source
-    samples_per_source = max(1, num // num_datasets)
-    remaining = num
+    print(f"Loading {num_datasets} sources with {per_dataset} samples each (total: {num_datasets * per_dataset})")
     
     # Sample from each source
     for source in selected_sources:
-        if remaining <= 0:
-            break
-        
         source_texts = source_groups[source]
-        sample_size = min(samples_per_source, len(source_texts), remaining)
+        sample_size = min(per_dataset, len(source_texts))
         
         # Randomly sample from this source
         if source_texts:
             sampled_texts = random.sample(source_texts, sample_size)
             texts.extend(sampled_texts)
             labels.extend([source] * sample_size)
-            remaining -= sample_size
             print(f"  Loaded {sample_size} samples from {source}")
+        else:
+            print(f"  Warning: No texts found for source '{source}'")
     
     # Shuffle to mix sources
     combined = list(zip(texts, labels))
     random.shuffle(combined)
     texts, labels = zip(*combined)
-    texts = list(texts[:num])
-    labels = list(labels[:num])
+    texts = list(texts)
+    labels = list(labels)
     
-    print(f"Total loaded: {len(texts)} samples")
-    return texts[:num], labels[:num]
+    total_samples = len(texts)
+    expected_total = num_datasets * per_dataset
+    print(f"Total loaded: {total_samples} samples (expected: {expected_total})")
+    if total_samples < expected_total:
+        print(f"Warning: Only found {total_samples} samples, requested {expected_total}")
+    
+    return texts, labels
 
 
 def _load_newsgroup_dataset(num: int, seed: int) -> Tuple[List[str], List[str]]:
@@ -365,9 +362,13 @@ def run(config_path: str) -> None:
     paths = ensure_dirs(base_dir, *subdirs)
 
     # data
-    num_datasets = int(cfg.get("num_datasets", 4))  # Default to 4 if not specified
+    num_datasets = int(cfg.get("num_datasets", 4))  # Default to 4 if not specified (for backward compatibility)
+    num_samples = int(cfg.get("num_samples", 100))  # Fallback if samples_per_dataset not provided
+    samples_per_dataset = cfg.get("samples_per_dataset", None)  # Number of samples per dataset
+    
     texts, labels = _select_nonempty_texts(
-        cfg["dataset"]["name"], cfg["dataset"]["config"], cfg["dataset"]["split"], int(cfg["num_samples"]), int(cfg["seed"]), num_datasets  # seed is unused but kept
+        cfg["dataset"]["name"], cfg["dataset"]["config"], cfg["dataset"]["split"],
+        num_samples, int(cfg["seed"]), num_datasets, samples_per_dataset
     )
 
     # tokenizer and model
@@ -390,7 +391,16 @@ def run(config_path: str) -> None:
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-        print(f"CUDA Version: {torch.version.cuda}")
+        print(f"CUDA Version (PyTorch): {torch.version.cuda}")
+        print(f"CUDA Version (System): {torch.version.cuda if torch.version.cuda else 'N/A'}")
+        # モデルがGPU上にあるか確認
+        print(f"Model device: {next(model.parameters()).device}")
+        # 初期GPUメモリ使用量
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            print(f"Initial GPU Memory: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
+    else:
+        print("WARNING: CUDA is not available, using CPU!")
     print(f"{'='*60}\n")
 
     max_length = int(cfg["max_length"])  # fixed length input
@@ -466,9 +476,27 @@ def run(config_path: str) -> None:
         etas.append(eta.detach().cpu().numpy().astype(np.float32))
         G_list.append(G_theta.detach().cpu().numpy().astype(np.float32))
         meta.append({"text": text, "label": labels[i]})
+        
+        # 定期的にGPUメモリ使用量を表示（100サンプルごと）
+        if (i + 1) % 100 == 0 and torch.cuda.is_available():
+            mem_allocated = torch.cuda.memory_allocated(0) / 1e9
+            mem_reserved = torch.cuda.memory_reserved(0) / 1e9
+            print(f"  [{i+1}/{len(texts)}] GPU Memory: {mem_allocated:.2f} GB allocated, {mem_reserved:.2f} GB reserved")
 
     eta_arr = np.stack(etas, axis=0)  # (N,D)
     G_arr = np.stack(G_list, axis=0)  # (N,D,D)
+    
+    # 最終的なGPUメモリ使用量を表示
+    if torch.cuda.is_available():
+        mem_allocated = torch.cuda.memory_allocated(0) / 1e9
+        mem_reserved = torch.cuda.memory_reserved(0) / 1e9
+        mem_peak = torch.cuda.max_memory_allocated(0) / 1e9
+        print(f"\n{'='*60}")
+        print(f"Final GPU Memory Usage:")
+        print(f"  Allocated: {mem_allocated:.2f} GB")
+        print(f"  Reserved: {mem_reserved:.2f} GB")
+        print(f"  Peak: {mem_peak:.2f} GB")
+        print(f"{'='*60}\n")
 
     # save artifacts
     save_npy(Path(base_dir) / cfg["embeddings_dir"] / "eta.npy", eta_arr)
