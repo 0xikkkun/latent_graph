@@ -57,7 +57,7 @@ git status
 git add .gitignore README.md docker-compose.yml requirements.txt Dockerfile.python app_streamlit.py src/ readme report/
 
 # コミット
-git commit -m "Initial commit: LLM Latent Space Visualization with Fisher Information Metric"
+git commit -m "message"
 
 # その後、ブランチ名をmainに変更
 git branch -M main
