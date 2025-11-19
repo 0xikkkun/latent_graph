@@ -37,16 +37,28 @@ python src/curvature.py --config src/config.yaml
 
 # 4. Streamlitアプリケーションを起動
 
-# streamlitの起動中のポートを確認
+# 方法1: docker-composeで自動起動（推奨）
+# docker-compose.ymlに設定済み。コンテナ起動時に自動的にStreamlitが起動します。
+docker-compose up -d
+# ブラウザで http://localhost:8505 にアクセス
+
+# 方法2: コンテナ内で手動起動
+docker-compose exec latent_graph bash
+# コンテナ内で実行（デフォルトで8501ポート、ホストからは8505でアクセス可能）
+streamlit run app_streamlit.py
+
+# 既存のStreamlitプロセスを確認
 ps aux | grep streamlit
 
-# Streamlitを再起動する場合：
+# 既存のStreamlitプロセスを停止する場合（ポート競合を避けるため）
+# 注意: 他のStreamlitアプリ（例：BERT Embedding Mapping）も停止されます
 pkill -9 -f streamlit
 
+# Streamlitを再起動する場合：
 streamlit run app_streamlit.py
 
 # 5. ブラウザで以下にアクセス
-http://localhost:8504
+http://localhost:8505
 
 
 ; gitのcommitとpush

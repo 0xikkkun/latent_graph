@@ -65,6 +65,273 @@ show_ellipses = st.sidebar.checkbox("楕円を表示", value=True)
 show_labels = st.sidebar.checkbox("ラベルを色で表示", value=True)
 show_curvature = st.sidebar.checkbox("曲率を色で表示", value=False)
 
+# Export options
+st.sidebar.header("📤 エクスポート")
+export_html_button = st.sidebar.button("📄 HTMLとしてエクスポート", type="secondary")
+
+
+def export_plots_to_html(config, output_dir="html_export", show_edges=True, show_ellipses=True, show_labels=True, show_curvature=False):
+    """Export all Plotly plots to HTML files"""
+    from datetime import datetime
+    import plotly.io as pio
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    try:
+        # Load data
+        G_fisher, G_euclidean, labels, unique_labels, label_counts, texts, G_2d, kappa_2d = load_data(config)
+        
+        # Compute MDS
+        X_fisher = compute_mds(G_fisher, seed=config["seed"])
+        X_euclidean = compute_mds(G_euclidean, seed=config["seed"])
+        
+        # Create all plots
+        fig_comparison = create_plotly_figure(X_fisher, X_euclidean, G_fisher, G_euclidean, 
+                                             labels, unique_labels, label_counts, G_2d, kappa_2d, 
+                                             show_edges, show_ellipses, show_labels, show_curvature)
+        
+        D_fisher = _all_pairs_shortest_path_matrix(G_fisher)
+        D_euclidean = _all_pairs_shortest_path_matrix(G_euclidean)
+        scatter_fig = create_distance_scatter_plot(D_fisher, D_euclidean, labels, unique_labels)
+        
+        # Export comparison plot
+        comparison_html = output_path / f"comparison_{timestamp}.html"
+        fig_comparison.write_html(str(comparison_html))
+        
+        # Export scatter plot
+        scatter_html = output_path / f"distance_scatter_{timestamp}.html"
+        scatter_fig.write_html(str(scatter_html))
+        
+        # Export Fisher metric plot if available
+        if G_2d is not None:
+            fisher_fig = create_fisher_metric_plot(X_fisher, G_fisher, labels, unique_labels, label_counts, 
+                                                  G_2d, kappa_2d, show_edges, show_ellipses, show_labels, show_curvature)
+            fisher_html = output_path / f"fisher_metric_{timestamp}.html"
+            fisher_fig.write_html(str(fisher_html))
+        
+        # Export histogram if available
+        if kappa_2d is not None:
+            import plotly.colors as pc
+            colors = pc.qualitative.Set3[:len(unique_labels)]
+            label_to_color = {label: colors[i] for i, label in enumerate(unique_labels)}
+            
+            fig_hist = go.Figure()
+            for label in unique_labels:
+                mask = np.array(labels) == label
+                kappa_label = kappa_2d[mask]
+                fig_hist.add_trace(go.Histogram(
+                    x=kappa_label,
+                    nbinsx=50,
+                    name=f"{label} ({label_counts.get(label, 0)})",
+                    marker_color=label_to_color[label],
+                    opacity=1.0,
+                    marker_line=dict(color='white', width=0.5),
+                    hovertemplate=f'Label: {label}<br>Range: %{{x}}<br>Count: %{{y}}<extra></extra>'
+                ))
+            
+            kappa_mean = np.mean(kappa_2d)
+            kappa_variance = np.var(kappa_2d)
+            
+            fig_hist.update_layout(
+                title=dict(text="Scalar Curvature Distribution", font=dict(size=18), x=0.5, xanchor='center'),
+                xaxis=dict(title="Scalar Curvature (κ)", showgrid=True, gridcolor='rgba(0,0,0,0.1)'),
+                yaxis=dict(title="Frequency", showgrid=True, gridcolor='rgba(0,0,0,0.1)'),
+                height=500,
+                barmode='stack',
+                plot_bgcolor='white',
+                paper_bgcolor='white',
+                showlegend=True,
+                annotations=[
+                    dict(text=f"Mean: {kappa_mean:.4f}, Variance: {kappa_variance:.4f}",
+                         xref="paper", yref="paper", x=0.5, y=1.03, showarrow=False)
+                ]
+            )
+            
+            fig_hist.add_vline(x=kappa_mean, line_dash="dash", line_color="black", line_width=1.5, opacity=0.5)
+            
+            hist_html = output_path / f"curvature_histogram_{timestamp}.html"
+            fig_hist.write_html(str(hist_html))
+        
+        # Export MDS eigenvalues
+        eigenvals_fisher, explained_ratio_fisher = compute_mds_eigenvalues(G_fisher)
+        eigenvals_euclidean, explained_ratio_euclidean = compute_mds_eigenvalues(G_euclidean)
+        
+        n_show = min(20, len(eigenvals_fisher), len(eigenvals_euclidean))
+        fig_eigen = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=("MDS Eigenvalues (Fisher Metric)", "MDS Eigenvalues (Euclidean Distance)"),
+            horizontal_spacing=0.15
+        )
+        
+        fig_eigen.add_trace(
+            go.Bar(x=list(range(1, n_show + 1)), y=eigenvals_fisher[:n_show], name="Fisher", marker_color='steelblue',
+                  text=[f'{r:.3f}' for r in explained_ratio_fisher[:n_show]], textposition='outside'),
+            row=1, col=1
+        )
+        
+        fig_eigen.add_trace(
+            go.Bar(x=list(range(1, n_show + 1)), y=eigenvals_euclidean[:n_show], name="Euclidean", marker_color='coral',
+                  text=[f'{r:.3f}' for r in explained_ratio_euclidean[:n_show]], textposition='outside'),
+            row=1, col=2
+        )
+        
+        fig_eigen.update_xaxes(title_text="Dimension", row=1, col=1)
+        fig_eigen.update_yaxes(title_text="Eigenvalue", row=1, col=1)
+        fig_eigen.update_xaxes(title_text="Dimension", row=1, col=2)
+        fig_eigen.update_yaxes(title_text="Eigenvalue", row=1, col=2)
+        fig_eigen.update_layout(height=500, showlegend=False)
+        
+        eigen_html = output_path / f"mds_eigenvalues_{timestamp}.html"
+        fig_eigen.write_html(str(eigen_html))
+        
+        # Create index HTML file
+        index_html = output_path / f"index_{timestamp}.html"
+        
+        # Read Plotly HTML content and extract plot divs and scripts
+        def extract_plot_content(html_file):
+            """Extract the plot div and scripts from Plotly HTML file"""
+            with open(html_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+                import re
+                # Extract everything between <body> and </body>
+                body_match = re.search(r'<body[^>]*>(.*?)</body>', content, re.DOTALL)
+                body_content = body_match.group(1) if body_match else ""
+                
+                # Extract all script tags (including Plotly library)
+                script_pattern = r'<script[^>]*>.*?</script>'
+                scripts = re.findall(script_pattern, content, re.DOTALL)
+                scripts_content = "\n".join(scripts)
+                
+                return body_content, scripts_content
+        
+        # Extract plot contents
+        comparison_body, comparison_scripts = extract_plot_content(comparison_html)
+        scatter_body, scatter_scripts = extract_plot_content(scatter_html)
+        fisher_body, fisher_scripts = ("", "") if G_2d is None else extract_plot_content(fisher_html)
+        hist_body, hist_scripts = ("", "") if kappa_2d is None else extract_plot_content(hist_html)
+        eigen_body, eigen_scripts = extract_plot_content(eigen_html)
+        
+        # Combine all scripts (Plotly library is the same, so we only need it once)
+        # Extract unique script content (avoid duplicates of Plotly library)
+        all_scripts_set = set()
+        all_scripts_list = []
+        
+        # Add scripts from each plot, avoiding duplicates
+        for scripts in [comparison_scripts, scatter_scripts, fisher_scripts, hist_scripts, eigen_scripts]:
+            if scripts:
+                # Split by script tags and add unique ones
+                import re
+                script_matches = re.findall(r'<script[^>]*>.*?</script>', scripts, re.DOTALL)
+                for script in script_matches:
+                    # Use a hash or first 100 chars to identify duplicates
+                    script_id = script[:200] if len(script) > 200 else script
+                    if script_id not in all_scripts_set:
+                        all_scripts_set.add(script_id)
+                        all_scripts_list.append(script)
+        
+        all_scripts = "\n".join(all_scripts_list)
+        
+        with open(index_html, 'w', encoding='utf-8') as f:
+            f.write(f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM潜在空間の幾何学的分析 - {timestamp}</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }}
+        h1 {{
+            color: #333;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 10px;
+        }}
+        .plot-container {{
+            background: white;
+            margin: 20px 0;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .plot-wrapper {{
+            width: 100%;
+            min-height: 600px;
+            margin: 10px 0;
+        }}
+        .info {{
+            background: #e3f2fd;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }}
+    </style>
+    {all_scripts}
+</head>
+<body>
+    <h1>🎯 LLM潜在空間の幾何学的分析</h1>
+    <div class="info">
+        <p><strong>エクスポート日時:</strong> {datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")}</p>
+        <p><strong>設定:</strong> {config.get('dataset', {}).get('name', 'N/A')}, k={config.get('knn_k', 'N/A')}</p>
+    </div>
+    
+    <div class="plot-container">
+        <h2>1. Fisher計量 vs ユークリッド距離の比較</h2>
+        <div class="plot-wrapper">
+            {comparison_body}
+        </div>
+    </div>
+    
+    <div class="plot-container">
+        <h2>2. 距離散布図</h2>
+        <div class="plot-wrapper">
+            {scatter_body}
+        </div>
+    </div>
+""")
+            if G_2d is not None:
+                f.write(f"""    <div class="plot-container">
+        <h2>3. Fisher計量可視化（楕円付き）</h2>
+        <div class="plot-wrapper">
+            {fisher_body}
+        </div>
+    </div>
+""")
+            if kappa_2d is not None:
+                f.write(f"""    <div class="plot-container">
+        <h2>4. スカラー曲率ヒストグラム</h2>
+        <div class="plot-wrapper">
+            {hist_body}
+        </div>
+    </div>
+""")
+            f.write(f"""    <div class="plot-container">
+        <h2>5. MDS固有値</h2>
+        <div class="plot-wrapper">
+            {eigen_body}
+        </div>
+    </div>
+</body>
+</html>""")
+        
+        return output_path, [
+            ("比較グラフ", comparison_html),
+            ("距離散布図", scatter_html),
+            ("Fisher計量", fisher_html if G_2d is not None else None),
+            ("曲率ヒストグラム", hist_html if kappa_2d is not None else None),
+            ("MDS固有値", eigen_html),
+            ("インデックス", index_html)
+        ]
+    except Exception as e:
+        raise Exception(f"エクスポート中にエラーが発生しました: {e}")
+
 
 def update_config(knn_k, dataset_name, num_datasets=None, samples_per_dataset=None):
     """Update config.yaml with new parameters"""
@@ -211,9 +478,8 @@ def compute_mds_eigenvalues(G: nx.Graph):
     # Double centering
     B = -0.5 * (D_sq - row_means - col_means + grand_mean)
     
-    # Compute eigenvalues (only positive ones, sorted in descending order)
+    # Compute eigenvalues (keep original order from eigvalsh - ascending order)
     eigenvals = np.linalg.eigvalsh(B)
-    eigenvals = eigenvals[::-1]  # Sort descending
     eigenvals = eigenvals[eigenvals > 0]  # Keep only positive eigenvalues
     
     # Calculate explained variance ratio
@@ -1167,4 +1433,49 @@ try:
 except Exception as e:
     if "run_button" not in locals():
         st.info("👈 左側のパラメータを設定して「パイプライン実行」ボタンを押してください。")
+
+# Handle HTML export
+if export_html_button:
+    try:
+        with open("src/config.yaml", "r") as f:
+            export_config = yaml.safe_load(f)
+        
+        base = Path(export_config["artifacts_dir"])
+        fisher_graph_path = base / export_config["graphs_dir"] / "gpt2.gpickle"
+        euclidean_graph_path = base / export_config["graphs_dir"] / "gpt2_euclidean.gpickle"
+        meta_path = base / export_config["embeddings_dir"] / "meta.json"
+        
+        if fisher_graph_path.exists() and euclidean_graph_path.exists() and meta_path.exists():
+            with st.spinner("HTMLファイルを生成中..."):
+                output_path, files = export_plots_to_html(export_config, 
+                                                         show_edges=show_edges, 
+                                                         show_ellipses=show_ellipses, 
+                                                         show_labels=show_labels, 
+                                                         show_curvature=show_curvature)
+                
+                st.success(f"✅ HTMLエクスポートが完了しました！")
+                st.info(f"📁 出力ディレクトリ: `{output_path}`")
+                
+                st.subheader("📄 生成されたファイル:")
+                for name, file_path in files:
+                    if file_path is not None:
+                        st.write(f"- **{name}**: `{file_path.name}`")
+                
+                # Show download links
+                st.subheader("📥 ダウンロード:")
+                for name, file_path in files:
+                    if file_path is not None:
+                        with open(file_path, 'rb') as f:
+                            st.download_button(
+                                label=f"📄 {name}をダウンロード",
+                                data=f.read(),
+                                file_name=file_path.name,
+                                mime="text/html",
+                                key=f"download_{name}"
+                            )
+        else:
+            st.error("❌ エクスポートするデータが見つかりません。まずパイプラインを実行してください。")
+    except Exception as e:
+        st.error(f"❌ エクスポート中にエラーが発生しました: {e}")
+        st.exception(e)
 

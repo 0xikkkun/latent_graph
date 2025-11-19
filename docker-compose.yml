@@ -14,7 +14,8 @@ services:
       # - ~/.local:/root/.local
       # - ~/.cache:/root/.cache
     ports:
-      - "8504:8501"  # Streamlit port mapping (host:container)
+      - "8505:8501"  # Streamlit port mapping (host:container) - changed from 8504 to avoid conflict
+    command: streamlit run app_streamlit.py --server.port 8501 --server.address 0.0.0.0
     deploy:
       resources:
         reservations:
